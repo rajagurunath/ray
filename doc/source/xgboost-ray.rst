@@ -1,5 +1,3 @@
-.. _xgboost-ray:
-
 ..
   This part of the docs is generated from the XGBoost-Ray readme using m2r
   To update:
@@ -8,9 +6,12 @@
   - Get rid of the badges in the top
   - Get rid of the references section at the bottom
   - Be sure not to delete the API reference section in the bottom of this file.
+  - add `.. _xgboost-ray-tuning:` before the "Hyperparameter Tuning" section
   - Adjust some link targets (e.g. for "Ray Tune") to anonymous references
     by adding a second underscore (use `target <link>`__)
   - Search for `\ **` and delete this from the links (bold links are not supported)
+
+.. _xgboost-ray:
 
 Distributed XGBoost on Ray
 ==========================
@@ -37,13 +38,13 @@ You can install the latest XGBoost-Ray release from PIP:
 
 .. code-block:: bash
 
-   pip install xgboost_ray
+   pip install "xgboost_ray"
 
 If you'd like to install the latest master, use this command instead:
 
 .. code-block:: bash
 
-   pip install git+https://github.com/ray-project/xgboost_ray.git#xgboost_ray
+   pip install "git+https://github.com/ray-project/xgboost_ray.git#egg=xgboost_ray"
 
 Usage
 -----
@@ -104,6 +105,85 @@ Here is a simplified example (which requires ``sklearn``\ ):
 
    print(pred_ray)
 
+scikit-learn API
+^^^^^^^^^^^^^^^^
+
+XGBoost-Ray also features a scikit-learn API fully mirroring pure
+XGBoost scikit-learn API, providing a completely drop-in
+replacement. The following estimators are available:
+
+
+* ``RayXGBClassifier``
+* ``RayXGRegressor``
+* ``RayXGBRFClassifier``
+* ``RayXGBRFRegressor``
+* ``RayXGBRanker``
+
+Example usage of ``RayXGBClassifier``\ :
+
+.. code-block:: python
+
+   from xgboost_ray import RayXGBClassifier, RayParams
+   from sklearn.datasets import load_breast_cancer
+   from sklearn.model_selection import train_test_split
+
+   seed = 42
+
+   X, y = load_breast_cancer(return_X_y=True)
+   X_train, X_test, y_train, y_test = train_test_split(
+       X, y, train_size=0.25, random_state=42
+   )
+
+   clf = RayXGBClassifier(
+       n_jobs=4,  # In XGBoost-Ray, n_jobs sets the number of actors
+       random_state=seed
+   )
+
+   # scikit-learn API will automatically conver the data
+   # to RayDMatrix format as needed.
+   # You can also pass X as a RayDMatrix, in which case
+   # y will be ignored.
+
+   clf.fit(X_train, y_train)
+
+   pred_ray = clf.predict(X_test)
+   print(pred_ray)
+
+   pred_proba_ray = clf.predict_proba(X_test)
+   print(pred_proba_ray)
+
+   # It is also possible to pass a RayParams object
+   # to fit/predict/predict_proba methods - will override
+   # n_jobs set during initialization
+
+   clf.fit(X_train, y_train, ray_params=RayParams(num_actors=2))
+
+   pred_ray = clf.predict(X_test, ray_params=RayParams(num_actors=2))
+   print(pred_ray)
+
+Things to keep in mind:
+
+
+* ``n_jobs`` parameter controls the number of actors spawned.
+  You can pass a ``RayParams`` object to the
+  ``fit``\ /\ ``predict``\ /\ ``predict_proba`` methods as the ``ray_params`` argument
+  for greater control over resource allocation. Doing
+  so will override the value of ``n_jobs`` with the value of
+  ``ray_params.num_actors`` attribute. For more information, refer
+  to the `Resources <#resources>`_ section below.
+* By default ``n_jobs`` is set to ``1``\ , which means the training
+  will **not** be distributed. Make sure to either set ``n_jobs``
+  to a higher value or pass a ``RayParams`` object as outlined above
+  in order to take advantage of XGBoost-Ray's functionality.
+* After calling ``fit``\ , additional evaluation results (e.g. training time,
+  number of rows, callback results) will be available under
+  ``additional_results_`` attribute.
+* XGBoost-Ray's scikit-learn API is based on XGBoost 1.4.
+  While we try to support older XGBoost versions, please note that
+  this library is only fully tested and supported for XGBoost >= 1.4.
+
+For more information on the scikit-learn API, refer to the `XGBoost documentation <https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn>`_.
+
 Data loading
 ------------
 
@@ -140,6 +220,9 @@ Example loading multiple parquet files:
        label="passenger_count",  # Will select this column as the label
        columns=columns,
        filetype=RayFileType.PARQUET)
+
+
+.. _xgboost-ray-tuning:
 
 Hyperparameter Tuning
 ---------------------
@@ -367,7 +450,7 @@ to make sure the data is evenly distributed across the source files.
 Lastly, XGBoost-Ray supports **distributed dataframe** representations, such
 as `Modin <https://modin.readthedocs.io/en/latest/>`_ and
 `Dask dataframes <https://docs.dask.org/en/latest/dataframe.html>`_
-(used with `Dask on Ray <https://docs.ray.io/en/master/dask-on-ray.html>`_\ ).
+(used with `Dask on Ray <https://docs.ray.io/en/master/data/dask-on-ray.html>`_\ ).
 Here, XGBoost-Ray will check on which nodes the distributed partitions
 are currently located, and will assign partitions to actors in order to
 minimize cross-node data transfer. Please note that we also assume here
@@ -411,9 +494,6 @@ Data sources
      - Yes
      - Yes
    * - `Petastorm <https://github.com/uber/petastorm>`__
-     - Yes
-     - Yes
-   * - `Ray MLDataset <https://docs.ray.io/en/master/iter.html>`__
      - Yes
      - Yes
    * - `Dask dataframe <https://docs.dask.org/en/latest/dataframe.html>`__
@@ -506,15 +586,15 @@ how long this timeout should be.
 More examples
 -------------
 
-Fore complete end to end examples, please have a look at
+For complete end to end examples, please have a look at
 the `examples folder <https://github.com/ray-project/xgboost_ray/tree/master/examples/>`_\ :
 
 
-* `Simple sklearn breastcancer dataset example <https://github.com/ray-project/xgboost_ray/tree/master/examples/simple.py>`_ (requires ``sklearn``\ )
-* `HIGGS classification example <https://github.com/ray-project/xgboost_ray/tree/master/examples/higgs.py>`_
+* `Simple sklearn breastcancer dataset example <https://github.com/ray-project/xgboost_ray/blob/master/xgboost_ray/examples/simple.py>`_ (requires ``sklearn``\ )
+* `HIGGS classification example <https://github.com/ray-project/xgboost_ray/blob/master/xgboost_ray/examples/higgs.py>`_
   (\ `download dataset (2.6 GB) <https://archive.ics.uci.edu/ml/machine-learning-databases/00280/HIGGS.csv.gz>`_\ )
-* `HIGGS classification example with Parquet <https://github.com/ray-project/xgboost_ray/tree/master/examples/higgs_parquet.py>`_ (uses the same dataset)
-* `Test data classification <https://github.com/ray-project/xgboost_ray/tree/master/examples/train_on_test_data.py>`_ (uses a self-generated dataset)
+* `HIGGS classification example with Parquet <https://github.com/ray-project/xgboost_ray/blob/master/xgboost_ray/examples/higgs_parquet.py>`_ (uses the same dataset)
+* `Test data classification <https://github.com/ray-project/xgboost_ray/blob/master/xgboost_ray/examples/train_on_test_data.py>`_ (uses a self-generated dataset)
 
 API reference
 -------------
@@ -528,3 +608,18 @@ API reference
 .. autofunction:: xgboost_ray.train
 
 .. autofunction:: xgboost_ray.predict
+
+scikit-learn API
+^^^^^^^^^^^^^^^^
+
+.. autoclass:: xgboost_ray.RayXGBClassifier
+    :members:
+
+.. autoclass:: xgboost_ray.RayXGBRegressor
+    :members:
+
+.. autoclass:: xgboost_ray.RayXGBRFClassifier
+    :members:
+
+.. autoclass:: xgboost_ray.RayXGBRFRegressor
+    :members:

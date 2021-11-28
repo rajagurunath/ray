@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import signal
@@ -8,7 +7,6 @@ import time
 
 import numpy as np
 import pytest
-import redis
 
 import ray
 from ray.experimental.internal_kv import _internal_kv_get
@@ -16,9 +14,10 @@ from ray.autoscaler._private.util import DEBUG_AUTOSCALING_ERROR
 import ray._private.utils
 from ray.util.placement_group import placement_group
 import ray.ray_constants as ray_constants
-from ray.cluster_utils import Cluster
-from ray.test_utils import (init_error_pubsub, get_error_message, Semaphore,
-                            wait_for_condition)
+from ray.cluster_utils import Cluster, cluster_not_supported
+from ray._private.test_utils import (init_error_pubsub, get_error_message,
+                                     get_log_batch, Semaphore,
+                                     wait_for_condition)
 
 
 def test_warning_for_infeasible_tasks(ray_start_regular, error_pubsub):
@@ -46,9 +45,22 @@ def test_warning_for_infeasible_tasks(ray_start_regular, error_pubsub):
     assert errors[0].type == ray_constants.INFEASIBLE_TASK_ERROR
 
     # Placement group cannot be made, but no warnings should occur.
-    pg = placement_group([{"GPU": 1}], strategy="STRICT_PACK")
-    pg.ready()
-    f.options(placement_group=pg).remote()
+    total_cpus = ray.cluster_resources()["CPU"]
+
+    # Occupy one cpu by an actor
+    @ray.remote(num_cpus=1)
+    class A:
+        pass
+
+    a = A.remote()
+    print(a)
+
+    @ray.remote(num_cpus=total_cpus)
+    def g():
+        pass
+
+    pg = placement_group([{"CPU": total_cpus}], strategy="STRICT_PACK")
+    g.options(placement_group=pg).remote()
 
     errors = get_error_message(
         p, 1, ray_constants.INFEASIBLE_TASK_ERROR, timeout=5)
@@ -68,11 +80,12 @@ def test_warning_for_infeasible_zero_cpu_actor(shutdown_only):
         pass
 
     # The actor creation should be infeasible.
-    Foo.remote()
+    a = Foo.remote()
     errors = get_error_message(p, 1, ray_constants.INFEASIBLE_TASK_ERROR)
     assert len(errors) == 1
     assert errors[0].type == ray_constants.INFEASIBLE_TASK_ERROR
     p.close()
+    del a
 
 
 def test_warning_for_too_many_actors(shutdown_only):
@@ -89,14 +102,14 @@ def test_warning_for_too_many_actors(shutdown_only):
             time.sleep(1000)
 
     # NOTE: We should save actor, otherwise it will be out of scope.
-    actor_group1 = [Foo.remote() for _ in range(num_cpus * 3)]
-    assert len(actor_group1) == num_cpus * 3
+    actor_group1 = [Foo.remote() for _ in range(num_cpus * 10)]
+    assert len(actor_group1) == num_cpus * 10
     errors = get_error_message(p, 1, ray_constants.WORKER_POOL_LARGE_ERROR)
     assert len(errors) == 1
     assert errors[0].type == ray_constants.WORKER_POOL_LARGE_ERROR
 
-    actor_group2 = [Foo.remote() for _ in range(num_cpus)]
-    assert len(actor_group2) == num_cpus
+    actor_group2 = [Foo.remote() for _ in range(num_cpus * 3)]
+    assert len(actor_group2) == num_cpus * 3
     errors = get_error_message(p, 1, ray_constants.WORKER_POOL_LARGE_ERROR)
     assert len(errors) == 1
     assert errors[0].type == ray_constants.WORKER_POOL_LARGE_ERROR
@@ -118,18 +131,18 @@ def test_warning_for_too_many_nested_tasks(shutdown_only):
         nested_wait.locked.remote(),
     ])
 
-    @ray.remote
+    @ray.remote(num_cpus=0.25)
     def f():
         time.sleep(1000)
         return 1
 
-    @ray.remote
+    @ray.remote(num_cpus=0.25)
     def h(nested_waits):
         nested_wait.release.remote()
         ray.get(nested_waits)
         ray.get(f.remote())
 
-    @ray.remote
+    @ray.remote(num_cpus=0.25)
     def g(remote_waits, nested_waits):
         # Sleep so that the f tasks all get submitted to the scheduler after
         # the g tasks.
@@ -229,58 +242,6 @@ def test_warning_for_many_duplicate_remote_functions_and_actors(shutdown_only):
         ray_constants.DUPLICATE_REMOTE_FUNCTION_THRESHOLD) in log_contents
 
 
-def test_redis_module_failure(ray_start_regular):
-    address_info = ray_start_regular
-    address = address_info["redis_address"]
-    address = address.split(":")
-    assert len(address) == 2
-
-    def run_failure_test(expecting_message, *command):
-        with pytest.raises(
-                Exception, match=".*{}.*".format(expecting_message)):
-            client = redis.StrictRedis(
-                host=address[0],
-                port=int(address[1]),
-                password=ray_constants.REDIS_DEFAULT_PASSWORD)
-            client.execute_command(*command)
-
-    def run_one_command(*command):
-        client = redis.StrictRedis(
-            host=address[0],
-            port=int(address[1]),
-            password=ray_constants.REDIS_DEFAULT_PASSWORD)
-        client.execute_command(*command)
-
-    run_failure_test("wrong number of arguments", "RAY.TABLE_ADD", 13)
-    run_failure_test("Prefix must be in the TablePrefix range",
-                     "RAY.TABLE_ADD", 100000, 1, 1, 1)
-    run_failure_test("Prefix must be in the TablePrefix range",
-                     "RAY.TABLE_REQUEST_NOTIFICATIONS", 100000, 1, 1, 1)
-    run_failure_test("Prefix must be a valid TablePrefix integer",
-                     "RAY.TABLE_ADD", b"a", 1, 1, 1)
-    run_failure_test("Pubsub channel must be in the TablePubsub range",
-                     "RAY.TABLE_ADD", 1, 10000, 1, 1)
-    run_failure_test("Pubsub channel must be a valid integer", "RAY.TABLE_ADD",
-                     1, b"a", 1, 1)
-    # Change the key from 1 to 2, since the previous command should have
-    # succeeded at writing the key, but not publishing it.
-    run_failure_test("Index is less than 0.", "RAY.TABLE_APPEND", 1, 1, 2, 1,
-                     -1)
-    run_failure_test("Index is not a number.", "RAY.TABLE_APPEND", 1, 1, 2, 1,
-                     b"a")
-    run_one_command("RAY.TABLE_APPEND", 1, 1, 2, 1)
-    # It's okay to add duplicate entries.
-    run_one_command("RAY.TABLE_APPEND", 1, 1, 2, 1)
-    run_one_command("RAY.TABLE_APPEND", 1, 1, 2, 1, 0)
-    run_one_command("RAY.TABLE_APPEND", 1, 1, 2, 1, 1)
-    run_one_command("RAY.SET_ADD", 1, 1, 3, 1)
-    # It's okey to add duplicate entries.
-    run_one_command("RAY.SET_ADD", 1, 1, 3, 1)
-    run_one_command("RAY.SET_REMOVE", 1, 1, 3, 1)
-    # It's okey to remove duplicate entries.
-    run_one_command("RAY.SET_REMOVE", 1, 1, 3, 1)
-
-
 # Note that this test will take at least 10 seconds because it must wait for
 # the monitor to detect enough missed heartbeats.
 def test_warning_for_dead_node(ray_start_cluster_2_nodes, error_pubsub):
@@ -336,7 +297,7 @@ def test_raylet_crash_when_get(ray_start_regular):
 
     thread = threading.Thread(target=sleep_to_kill_raylet)
     thread.start()
-    with pytest.raises(ray.exceptions.ObjectLostError):
+    with pytest.raises(ray.exceptions.ReferenceCountingAssertionError):
         ray.get(object_ref)
     thread.join()
 
@@ -360,7 +321,7 @@ def test_eviction(ray_start_cluster):
     # Evict the object.
     ray.internal.free([obj])
     # ray.get throws an exception.
-    with pytest.raises(ray.exceptions.ObjectLostError):
+    with pytest.raises(ray.exceptions.ReferenceCountingAssertionError):
         ray.get(obj)
 
     @ray.remote
@@ -416,6 +377,7 @@ def test_serialized_id(ray_start_cluster):
     ray.get(get.remote([obj], True))
 
 
+@pytest.mark.xfail(cluster_not_supported, reason="cluster not supported")
 @pytest.mark.parametrize("use_actors,node_failure",
                          [(False, False), (False, True), (True, False),
                           (True, True)])
@@ -506,24 +468,16 @@ def test_fate_sharing(ray_start_cluster, use_actors, node_failure):
     }],
     indirect=True)
 def test_gcs_server_failiure_report(ray_start_regular, log_pubsub):
-    p = log_pubsub
     # Get gcs server pid to send a signal.
     all_processes = ray.worker._global_node.all_processes
     gcs_server_process = all_processes["gcs_server"][0].process
     gcs_server_pid = gcs_server_process.pid
 
     os.kill(gcs_server_pid, signal.SIGBUS)
-    msg = None
-    cnt = 0
-    # wait for max 30 seconds.
-    while cnt < 3000 and not msg:
-        msg = p.get_message()
-        if msg is None:
-            time.sleep(0.01)
-            cnt += 1
-            continue
-        data = json.loads(ray._private.utils.decode(msg["data"]))
-        assert data["pid"] == "gcs_server"
+    # wait for 30 seconds, for the 1st batch of logs.
+    batches = get_log_batch(log_pubsub, 1, timeout=30)
+    assert len(batches) == 1
+    assert batches[0]["pid"] == "gcs_server", batches
 
 
 def test_raylet_node_manager_server_failure(ray_start_cluster_head,
@@ -533,21 +487,15 @@ def test_raylet_node_manager_server_failure(ray_start_cluster_head,
     # Reuse redis port to make node manager grpc server fail to start.
     with pytest.raises(Exception):
         cluster.add_node(wait=False, node_manager_port=redis_port)
-    p = log_pubsub
-    cnt = 0
+
     # wait for max 10 seconds.
-    found = False
-    while cnt < 1000 and not found:
-        msg = p.get_message()
-        if msg is None:
-            time.sleep(0.01)
-            cnt += 1
-            continue
-        data = json.loads(ray._private.utils.decode(msg["data"]))
-        if data["pid"] == "raylet":
-            found = any("Failed to start the grpc server." in line
-                        for line in data["lines"])
-    assert found
+    def matcher(log_batch):
+        return log_batch["pid"] == "raylet" and any(
+            "Failed to start the grpc server." in line
+            for line in log_batch["lines"])
+
+    match = get_log_batch(log_pubsub, 1, timeout=10, matcher=matcher)
+    assert len(match) > 0
 
 
 if __name__ == "__main__":

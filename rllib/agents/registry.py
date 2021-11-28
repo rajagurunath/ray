@@ -3,7 +3,7 @@
 import traceback
 
 from ray.rllib.contrib.registry import CONTRIBUTED_ALGORITHMS
-from ray.rllib.utils.deprecation import deprecation_warning
+from ray.rllib.utils.deprecation import Deprecated
 
 
 def _import_a2c():
@@ -116,6 +116,11 @@ def _import_sac():
     return sac.SACTrainer, sac.DEFAULT_CONFIG
 
 
+def _import_rnnsac():
+    from ray.rllib.agents import sac
+    return sac.RNNSACTrainer, sac.RNNSAC_DEFAULT_CONFIG
+
+
 def _import_simple_q():
     from ray.rllib.agents import dqn
     return dqn.SimpleQTrainer, dqn.simple_q.DEFAULT_CONFIG
@@ -155,6 +160,7 @@ ALGORITHMS = {
     "QMIX": _import_qmix,
     "R2D2": _import_r2d2,
     "SAC": _import_sac,
+    "RNNSAC": _import_rnnsac,
     "SimpleQ": _import_simple_q,
     "TD3": _import_td3,
 }
@@ -168,15 +174,14 @@ def get_trainer_class(alg: str, return_config=False) -> type:
     except ImportError:
         from ray.rllib.agents.mock import _trainer_import_failed
         class_ = _trainer_import_failed(traceback.format_exc())
-        config = class_._default_config
+        config = class_.get_default_config()
         if return_config:
             return class_, config
         return class_
 
 
-# Deprecated: Use `get_trainer_class` instead.
+@Deprecated(new="get_trainer_class", error=False)
 def get_agent_class(alg: str) -> type:
-    deprecation_warning("get_agent_class", "get_trainer_class", error=False)
     return get_trainer_class(alg)
 
 
@@ -190,14 +195,15 @@ def _get_trainer_class(alg: str, return_config=False) -> type:
         class_, config = script_runner.ScriptRunner, {}
     elif alg == "__fake":
         from ray.rllib.agents.mock import _MockTrainer
-        class_, config = _MockTrainer, _MockTrainer._default_config
+        class_, config = _MockTrainer, _MockTrainer.get_default_config()
     elif alg == "__sigmoid_fake_data":
         from ray.rllib.agents.mock import _SigmoidFakeData
-        class_, config = _SigmoidFakeData, _SigmoidFakeData._default_config
+        class_, config = _SigmoidFakeData, _SigmoidFakeData.get_default_config(
+        )
     elif alg == "__parameter_tuning":
         from ray.rllib.agents.mock import _ParameterTuningTrainer
         class_, config = _ParameterTuningTrainer, \
-            _ParameterTuningTrainer._default_config
+            _ParameterTuningTrainer.get_default_config()
     else:
         raise Exception(("Unknown algorithm {}.").format(alg))
 
